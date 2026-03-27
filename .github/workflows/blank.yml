@@ -1,0 +1,83 @@
+name: PowerShell CI/CD
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -ErrorAction Stop
+
+      - name: Lint with PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path ./ -Recurse -Severity Error
+          if ($results) {
+              $results | Format-Table
+              exit 1
+          }
+
+      - name: Run Pester Tests
+        shell: pwsh
+        run: |
+          Invoke-Pester -Path ./ -Passthru -ErrorAction Stop
+  
+  package:
+    name: Build and Archive Artifact
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create Local NuGet Package
+        shell: pwsh
+        run: |
+          $tempRepo = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\LocalRepo"
+          Register-PSRepository -Name "LocalBuild" -SourceLocation $tempRepo.FullName -InstallationPolicy Trusted
+          Publish-Module -Path ./ -Repository "LocalBuild" -Verbose
+          New-Item -ItemType Directory -Path "./out"
+          Get-ChildItem -Path $tempRepo.FullName -Filter *.nupkg | Copy-Item -Destination "./out"
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutotaskAPI
+          path: ./out/*.nupkg
+          retention-days: 5
+  
+  release:
+    name: Create GitHub Release
+    needs: package
+    
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Download Built Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AutotaskAPI
+          path: ./release-artifacts
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./release-artifacts/*.nupkg
+          generate_release_notes: true
+          draft: true
+          prerelease: false
