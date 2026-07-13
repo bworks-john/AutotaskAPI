@@ -23,6 +23,7 @@
     -SimpleSearch: a simple search filter, e.g. name eq Lime
     -Udf: Forces any query to be checked against the Udfs belonging to the entity
     -ResolveLabels: Resolves picklist field IDs to their label value
+    -ResolveAllLabels: Resolves picklist field IDs to their label value, and attempts to do this for IDs from other entities
     -LocalTime: Any date/time responses will be returned in the local user time, rather than the default UTC
     -Base: Queries the base endpoint without any search filter. Used for entities where this is required such as ZoneInformation
     -ListAll: Outputs a list of all API entities.
@@ -68,6 +69,10 @@ function Get-AutotaskAPIResource {
         # Query the picklist index to resolve labels from value
         [Parameter(Mandatory = $false)]
         [switch]$ResolveLabels,
+
+        # Query the picklist index to resolve labels from values across all entities involved where possible
+        [Parameter(Mandatory = $false)]
+        [switch]$ResolveAllLabels,
 
         # Generate a URL to open selected entities in the Autotask GUI
         [Parameter(Mandatory = $false)]
@@ -126,7 +131,7 @@ function Get-AutotaskAPIResource {
             # Picklist metadata lookup
             $picklistFields = @()
             $picklistMap    = @{}
-            if ($ResolveLabels.IsPresent) {
+            if ($ResolveLabels.IsPresent -or $ResolveAllLabels.IsPresent) {
                 try {
                         $pickMeta       = Get-AutotaskPicklistMeta -Resource $resource
                         $picklistFields = $pickMeta.PicklistFields
@@ -405,103 +410,83 @@ $SetURI = "$($Script:AutotaskBaseURI)$path"
                     return $items
                 }
 
-                if ($items.items) {
-                    foreach ($item in $items.items) {
-                        if ($ResolveLabels.IsPresent -and $picklistFields -and $picklistMap) {
-                            foreach ($fieldName in $picklistFields) {
-                                # Skip if this object doesn't even have that property
-                                if (-not ($item.PSObject.Properties.Name -contains $fieldName)) { continue }
-                                $rawValue = $item.$fieldName
-                                $fieldMap = $picklistMap[$fieldName]
-                                if (-not $fieldMap) { continue }
-                                $label = $fieldMap["$rawValue"]
-                                if (-not $label) { continue }
-                                # Add label below numeric picklist value output
-                                $item | Add-Member -NotePropertyName "$($fieldName)Label" -NotePropertyValue $label -Force
-                            }
-                        }
-                        if ($LocalTime) {
-                            foreach ($prop in $item.PSObject.Properties) {
-                                $value = $prop.Value
-                                if ($value -is [datetime]) {
-                                    $dt = [datetime]$value
-                                    if ($dt.Kind -ne [System.DateTimeKind]::Utc) {
-                                        $dt = [System.DateTime]::SpecifyKind($dt, [System.DateTimeKind]::Utc)
-                                    }
-                                    $prop.Value = $dt.ToLocalTime()
-                                    continue
-                                }
-                                if ($value -is [string] -and $value -match '^\d{4}-\d{2}-\d{2}T.*Z$') {
-                                    try {
-                                        $dt = [datetime]::Parse(
-                                            $value,
-                                            [System.Globalization.CultureInfo]::InvariantCulture,
-                                            [System.Globalization.DateTimeStyles]::AssumeUniversal
-                                            )
-                                            $prop.Value = $dt.ToLocalTime()
-                                        }
-                                        catch {
-                                            # If parsing fails, don't change the output
-                                            }
-                                        }
-                            }
-                        }
-                        if ($URL) {
-                            $item | Get-AutotaskEntityURL -Entity $resource
-                        } else {
-                            $item
-                        }
-                    }
+                $returnedItems = @()
+
+                if ($items.PSObject.Properties['items'] -and $null -ne $items.items) {
+                    $returnedItems = @($items.items)
+                }
+                elseif ($items.PSObject.Properties['item'] -and $null -ne $items.item) {
+                    $returnedItems = @($items.item)
                 }
 
-                if ($items.item) {
-                    foreach ($item in $items.item) {
-                        if ($ResolveLabels.IsPresent -and $picklistFields -and $picklistMap) {
+                if ($ResolveAllLabels.IsPresent -and $returnedItems.Count -gt 0) {
+                    try {
+                        $returnedItems = @(
+                            Resolve-AutotaskReferenceLabels -Resource $Resource -InputObject $returnedItems
+                            )
+                        }
+                        catch {
+                            Write-Warning "Failed to resolve entity references for '$Resource': $($_.Exception.Message)"
+                        }
+                    }
+                    
+                    foreach ($item in $returnedItems) {
+                        if (($ResolveLabels.IsPresent -or $ResolveAllLabels.IsPresent) -and $picklistFields -and $picklistMap) {
                             foreach ($fieldName in $picklistFields) {
-                                if (-not ($item.PSObject.Properties.Name -contains $fieldName)) { continue }
-                                $rawValue = $item.$fieldName
+                                $property = $item.PSObject.Properties[$fieldName]
+                                if (-not $property) {
+                                    continue
+                                }
+                                
+                                $rawValue = $property.Value
                                 $fieldMap = $picklistMap[$fieldName]
-                                if (-not $fieldMap) { continue }
-                                $label = $fieldMap["$rawValue"]
-                                if (-not $label) { continue }
-                                # Add label below numeric picklist value output
+                                if (-not $fieldMap) {
+                                    continue
+                                }
+                                
+                                $mapKey = [string]$rawValue
+                                if (-not $fieldMap.ContainsKey($mapKey)) {
+                                    continue
+                                }
+                                $label = $fieldMap[$mapKey]
                                 $item | Add-Member -NotePropertyName "$($fieldName)Label" -NotePropertyValue $label -Force
                             }
                         }
+                        
                         if ($LocalTime) {
                             foreach ($prop in $item.PSObject.Properties) {
                                 $value = $prop.Value
                                 if ($value -is [datetime]) {
                                     $dt = [datetime]$value
                                     if ($dt.Kind -ne [System.DateTimeKind]::Utc) {
-                                        $dt = [System.DateTime]::SpecifyKind($dt, [System.DateTimeKind]::Utc)
-                                    }
-                                    $prop.Value = $dt.ToLocalTime()
-                                    continue
-                                }
-                                if ($value -is [string] -and $value -match '^\d{4}-\d{2}-\d{2}T.*Z$') {
-                                    try {
-                                        $dt = [datetime]::Parse(
-                                            $value,
-                                            [System.Globalization.CultureInfo]::InvariantCulture,
-                                            [System.Globalization.DateTimeStyles]::AssumeUniversal
+                                        $dt = [System.DateTime]::SpecifyKind(
+                                            $dt,[System.DateTimeKind]::Utc
                                             )
-                                            $prop.Value = $dt.ToLocalTime()
                                         }
-                                        catch {
-                                            # If parsing fails, don't change the output
+                                        $prop.Value = $dt.ToLocalTime()
+                                        continue
+                                    }
+                                    if ($value -is [string] -and $value -match '^\d{4}-\d{2}-\d{2}T.*Z$') {
+                                        try {
+                                            $dt = [datetime]::Parse(
+                                                $value,[System.Globalization.CultureInfo]::InvariantCulture,[System.Globalization.DateTimeStyles]::AssumeUniversal
+                                                )
+                                                $prop.Value = $dt.ToLocalTime()
+                                            }
+                                            catch {
+                                                # If parsing fails, leave the original value unchanged.
+                                                }
+                                            }
                                         }
                                     }
-                            }
-                        }
-                        if ($URL) {
-                            $item | Get-AutotaskEntityURL -Entity $resource
-                        } else {
-                            $item
-                        }
-                    }
-                }
-            } while ($null -ne $SetURI)
+                                    if ($URL) {
+                                        $item | Get-AutotaskEntityURL -Entity $Resource
+                                    }
+                                    else {
+                                        $item
+                                    }
+                                }
+                } while ($null -ne $SetURI)
         }
         catch {         
             $ex   = $_.Exception
