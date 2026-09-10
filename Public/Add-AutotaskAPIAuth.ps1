@@ -38,7 +38,7 @@ finally {
     try {
         $VersionInfoResponse = Invoke-WebRequest -UseBasicParsing -Uri "https://webservices2.autotask.net/atservicesrest/versioninformation"
         $VersionInfo         = $VersionInfoResponse.Content | ConvertFrom-Json
-        $Version             = $VersionInfo.apiVersions | Select-Object -Last 1
+        $Version             = $VersionInfo.apiVersions | Select-Object -First 1
         
         $ZoneInfoResponse = Invoke-WebRequest -UseBasicParsing -Uri "https://webservices2.autotask.net/atservicesrest/$Version/zoneInformation?user=$($Script:AutotaskAuthHeader.UserName)"
         $ZoneInfo         = $ZoneInfoResponse.Content | ConvertFrom-Json
